@@ -1,11 +1,7 @@
-use bstr::{BStr, ByteSlice};
-use memmap::MmapOptions;
-use rustc_hash::FxHashMap as HashMap;
-use std::{fmt::Display, fs::File};
 
-use rayon::prelude::*;
+use std::{fmt::Display, collections::HashMap, error::Error, fs::File, io::{BufRead, BufReader}};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct State {
     min: f64,
     max: f64,
@@ -13,104 +9,56 @@ struct State {
     sum: f64,
 }
 
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            min: f64::MAX,
-            max: f64::MIN,
-            count: 0,
-            sum: 0.0,
-        }
-    }
-}
-
-impl Display for State {
+impl Display for State{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let avg = self.sum / (self.count as f64);
-        write!(f, "{:.1}/{avg:.1}/{:.1}", self.min, self.max)
+        write!(f, "{}/{}/{}", self.min, self.max, self.sum/(self.count as f64))
     }
 }
 
-impl State {
-    fn update(&mut self, v: f64) {
-        self.min = self.min.min(v);
-        self.max = self.max.max(v);
-        self.count += 1;
-        self.sum += v;
-    }
 
-    fn merge(&mut self, other: &Self) {
-        self.min = self.min.min(other.min);
-        self.max = self.max.max(other.max);
-        self.count += other.count;
-        self.sum += other.sum;
-    }
-}
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut stations_stats : HashMap<String, State> = HashMap::new();
+    // let cores: usize = std::thread::available_parallelism().unwrap().into();
 
-fn make_map<'a>(i: impl Iterator<Item = &'a [u8]>) -> HashMap<&'a BStr, State> {
-    let mut state: HashMap<&'a BStr, State> = Default::default();
-    for line in i {
-        let (name, value) = line.split_once_str(&[b';']).unwrap();
-        let value = fast_float::parse(value).unwrap();
-        state.entry(name.into()).or_default().update(value);
-    }
-    state
-}
-
-fn solve_for_part((start, end): (usize, usize), mem: &[u8]) -> HashMap<&BStr, State> {
-    make_map((&mem[start..end]).lines())
-}
-
-fn merge<'a>(a: &mut HashMap<&'a BStr, State>, b: &HashMap<&'a BStr, State>) {
-    for (k, v) in b {
-        a.entry(k).or_default().merge(v);
-    }
-}
-
-fn main() {
-    let cores: usize = std::thread::available_parallelism().unwrap().into();
     let path = match std::env::args().skip(1).next() {
         Some(path) => path,
         None => "measurements.txt".to_owned(),
     };
-    let file = File::open(path).unwrap();
-    let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
 
-    let chunk_size = mmap.len() / cores;
-    let mut chunks: Vec<(usize, usize)> = vec![];
-    let mut start = 0;
-    for _ in 0..cores {
-        let end = (start + chunk_size).min(mmap.len());
-        let next_new_line = match memchr::memchr(b'\n', &mmap[end..]) {
-            Some(v) => v,
-            None => {
-                assert_eq!(end, mmap.len());
-                0
-            }
-        };
-        let end = end + next_new_line;
-        chunks.push((start, end));
-        start = end + 1;
-    }
-    let parts: Vec<_> = chunks
-        .par_iter()
-        .map(|r| solve_for_part(*r, &mmap))
-        .collect();
+    let file = File::open(path)?;
+    let lines = BufReader::new(file).lines();
 
-    let state: HashMap<&BStr, State> = parts.into_iter().fold(Default::default(), |mut a, b| {
-        merge(&mut a, &b);
-        a
-    });
+    for line in lines {
+        let line_string = line?;
+        let mut splitline = line_string.split(";");
+        let station = splitline.next().expect("first element is the station").to_string();
+        let value = splitline.next().expect("second element is the value").parse::<f64>().expect("value can be parsed into f64");
 
-    let mut all: Vec<_> = state.into_iter().collect();
-    all.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let mut current_state_opt = stations_stats.get(&station);
+        let state = State { min: value, max: value, count: 1, sum: value};
+        let current_state = current_state_opt.get_or_insert(&state);
+
+        let new_min = if current_state.min < value {current_state.min} else {value};
+        let new_max = if current_state.max > value {current_state.max} else {value};
+        let new_count = current_state.count + 1;
+        let new_sum = current_state.sum + value;
+
+        let updated_state = State { min: new_min, max: new_max, count: new_count, sum: new_sum};
+
+        stations_stats.insert(station, updated_state);
+
+    };
+
     print!("{{");
-    for (i, (name, state)) in all.into_iter().enumerate() {
-        if i == 0 {
-            print!("{name}={state}");
-        } else {
-            print!(", {name}={state}");
-        }
+
+    let mut station_iter_sorted: Vec<&String> = stations_stats.keys().collect();
+    station_iter_sorted.sort();
+    
+    for station in station_iter_sorted{
+        let state = stations_stats.get(station).expect("Station must exist");
+        print!("{station}={state},");
     }
-    println!("}}");
+    print!("}}");
+
+    Ok(())
 }
