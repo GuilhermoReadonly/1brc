@@ -1,9 +1,5 @@
 use std::{
-    collections::HashMap,
-    error::Error,
-    fmt::Display,
-    fs::{self, File},
-    io::{BufRead, BufReader}, time::Instant,
+    collections::HashMap, error::Error, fmt::Display, fs::{self, File}, io::{BufRead, BufReader}, sync::{Arc, Mutex}, thread, time::Instant
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -27,47 +23,55 @@ impl Display for State {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut stations_stats: HashMap<String, State> = HashMap::new();
-    // let cores: usize = std::thread::available_parallelism().unwrap().into();
+    let stations_stats: HashMap<String, State> = HashMap::new();
+    let stations_stats = Arc::new(Mutex::new(stations_stats));
+    let cores: usize = std::thread::available_parallelism().unwrap().into();
 
     let path = match std::env::args().skip(1).next() {
         Some(path) => path,
         None => "measurements.txt".to_owned(),
     };
 
-    let metadata = fs::metadata(&path)?;
-
-    println!("File size = {}", metadata.len());
-
     let now = Instant::now();
-    read(path, &mut stations_stats)?;
+    read(cores, path, stations_stats.clone())?;
     let elapsed_time = now.elapsed();
     println!("Running read() took {} ms.", elapsed_time.as_millis());
 
     let now = Instant::now();
-    write_result(stations_stats);
+    write_result(stations_stats)?;
     let elapsed_time = now.elapsed();
-    println!("Running write_result() took {} ms.", elapsed_time.as_millis());
+    println!(
+        "Running write_result() took {} ms.",
+        elapsed_time.as_millis()
+    );
 
     Ok(())
 }
 
-fn write_result(stations_stats: HashMap<String, State>) {
+fn write_result(stations_stats: Arc<Mutex<HashMap<String, State>>>) -> Result<(), Box<dyn Error>> {
     print!("{{");
-    
-    let mut station_iter_sorted: Vec<&String> = stations_stats.keys().collect();
+
+    let s = stations_stats.lock().unwrap();
+    let mut station_iter_sorted: Vec<&String> = s.keys().collect();
     station_iter_sorted.sort();
-    
+
     for station in station_iter_sorted {
-        let state = stations_stats.get(station).expect("Station must exist");
+        let state = s.get(station).expect("Station must exist");
         print!("{station}={state}, ");
     }
-    print!("}}");
-    }
+    println!("}}");
+    Ok(())
+}
 
-
-fn read(path: String, stations_stats: &mut HashMap<String, State>) -> Result<(), Box<dyn Error>> {
+fn read_chunk(
+    path: String,
+    stations_stats: Arc<Mutex<HashMap<String, State>>>,
+    _start: u64,
+    _size: u64,
+) -> Result<(), Box<dyn Error>> {
+    println!("{:?}: Start read_chunk", thread::current().id());
     let file = File::open(&path)?;
+
     let lines = BufReader::new(file).lines();
     for line in lines {
         let line_string = line?;
@@ -82,7 +86,9 @@ fn read(path: String, stations_stats: &mut HashMap<String, State>) -> Result<(),
             .parse::<f64>()
             .expect("value can be parsed into f64");
 
-        let mut current_state_opt = stations_stats.get(&station);
+        let s = stations_stats.lock();
+        let mut s = s.unwrap();
+        let mut current_state_opt = s.get(&station);
         let state = State {
             min: value,
             max: value,
@@ -111,7 +117,29 @@ fn read(path: String, stations_stats: &mut HashMap<String, State>) -> Result<(),
             sum: new_sum,
         };
 
-        stations_stats.insert(station, updated_state);
+        s.insert(station, updated_state);
+    }
+    println!("{:?}: End read_chunk", thread::current().id());
+    Ok(())
+}
+
+fn read(
+    nb_cores: usize,
+    path: String,
+    stations_stats: Arc<Mutex<HashMap<String, State>>>,
+) -> Result<(), Box<dyn Error>> {
+    let file_size = fs::metadata(&path)?.len();
+    let chunk_size: u64 = file_size / nb_cores as u64;
+
+    for core in 0..nb_cores {
+        let stat = Arc::clone(&stations_stats);
+        let path = path.clone();
+        println!("{:?}: Before spawning in read", thread::current().id());
+        let _thread = std::thread::spawn(move || {
+            let start = core as u64 * chunk_size;
+            read_chunk(path, stat, start, chunk_size).unwrap();
+        });
+        println!("{:?}: After spawning thread {:?}", thread::current().id(), _thread.thread().id());
     }
     Ok(())
 }
