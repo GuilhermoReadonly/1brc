@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     error::Error,
     fmt::Display,
     fs::{self, File},
@@ -30,13 +30,13 @@ impl Display for State {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let stations_stats: HashMap<String, State> = HashMap::new();
+    let stations_stats: BTreeMap<String, State> = BTreeMap::new();
     let stations_stats = Arc::new(Mutex::new(stations_stats));
     let cores: usize = std::thread::available_parallelism().unwrap().into();
 
     let path = match std::env::args().skip(1).next() {
         Some(path) => path,
-        None => "measurements.txt".to_owned(),
+        None => "measurements_sample.txt".to_owned(),
     };
 
     let metadata = fs::metadata(&path)?;
@@ -58,16 +58,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn write_result(stations_stats: Arc<Mutex<HashMap<String, State>>>) -> Result<(), Box<dyn Error>> {
+fn write_result(stations_stats: Arc<Mutex<BTreeMap<String, State>>>) -> Result<(), Box<dyn Error>> {
     print!("{{");
 
     let s = stations_stats.lock().unwrap();
-    let mut station_iter_sorted: Vec<&String> = s.keys().collect();
-    station_iter_sorted.sort();
 
-    for station in station_iter_sorted {
-        let _state = s.get(station).expect("Station must exist");
-        print!("{station}={_state}, ");
+    for (station, state) in s.iter() {
+        print!("{station}={state}, ");
     }
     println!("}}");
     Ok(())
@@ -75,7 +72,7 @@ fn write_result(stations_stats: Arc<Mutex<HashMap<String, State>>>) -> Result<()
 
 fn read_chunk(
     path: String,
-    stations_stats: Arc<Mutex<HashMap<String, State>>>,
+    stations_stats: Arc<Mutex<BTreeMap<String, State>>>,
     _start: u64,
     _size: u64,
 ) -> Result<(), Box<dyn Error>> {
@@ -146,7 +143,7 @@ fn read_chunk(
 fn read(
     nb_cores: usize,
     path: String,
-    stations_stats: Arc<Mutex<HashMap<String, State>>>,
+    stations_stats: Arc<Mutex<BTreeMap<String, State>>>,
 ) -> Result<(), Box<dyn Error>> {
     let file_size = fs::metadata(&path)?.len();
     let chunk_size: u64 = file_size / nb_cores as u64;
