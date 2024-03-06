@@ -1,5 +1,12 @@
 use std::{
-    collections::HashMap, error::Error, fmt::Display, fs::{self, File}, io::{BufRead, BufReader}, sync::{Arc, Mutex}, thread, time::Instant
+    collections::HashMap,
+    error::Error,
+    fmt::Display,
+    fs::{self, File},
+    io::{BufRead, BufReader, Seek},
+    sync::{Arc, Mutex},
+    thread::{self, JoinHandle},
+    time::Instant,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -32,17 +39,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         None => "measurements.txt".to_owned(),
     };
 
+    let metadata = fs::metadata(&path)?;
+    println!("File size = {}", metadata.len());
+
     let now = Instant::now();
     read(cores, path, stations_stats.clone())?;
     let elapsed_time = now.elapsed();
-    println!("Running read() took {} ms.", elapsed_time.as_millis());
+    println!("Running read() took {} us.", elapsed_time.as_micros());
 
     let now = Instant::now();
     write_result(stations_stats)?;
     let elapsed_time = now.elapsed();
     println!(
-        "Running write_result() took {} ms.",
-        elapsed_time.as_millis()
+        "Running write_result() took {} us.",
+        elapsed_time.as_micros()
     );
 
     Ok(())
@@ -56,8 +66,8 @@ fn write_result(stations_stats: Arc<Mutex<HashMap<String, State>>>) -> Result<()
     station_iter_sorted.sort();
 
     for station in station_iter_sorted {
-        let state = s.get(station).expect("Station must exist");
-        print!("{station}={state}, ");
+        let _state = s.get(station).expect("Station must exist");
+        print!("{station}={_state}, ");
     }
     println!("}}");
     Ok(())
@@ -70,25 +80,35 @@ fn read_chunk(
     _size: u64,
 ) -> Result<(), Box<dyn Error>> {
     println!("{:?}: Start read_chunk", thread::current().id());
-    let file = File::open(&path)?;
+    let mut file = File::open(&path)?;
+
+    file.seek(std::io::SeekFrom::Start(_start))?;
+
 
     let lines = BufReader::new(file).lines();
+
+    let mut size_read = 0;
     for line in lines {
+
+        if size_read >= _size{
+            break;
+        }
         let line_string = line?;
-        let mut splitline = line_string.split(";");
-        let station = splitline
-            .next()
-            .expect("first element is the station")
-            .to_string();
-        let value = splitline
-            .next()
-            .expect("second element is the value")
-            .parse::<f64>()
-            .expect("value can be parsed into f64");
+
+        size_read += line_string.bytes().len() as u64;
+
+        let splitline: Vec<&str> = line_string.split(";").collect();
+        if splitline.len() != 2{
+            println!("{:?}: After {size_read} read from {_start}, the line is malformed: {line_string:?}", thread::current().id());
+            continue;
+        }
+
+        let station = splitline[0];
+        let value = splitline[1].parse()?;
 
         let s = stations_stats.lock();
         let mut s = s.unwrap();
-        let mut current_state_opt = s.get(&station);
+        let mut current_state_opt = s.get(station);
         let state = State {
             min: value,
             max: value,
@@ -117,7 +137,7 @@ fn read_chunk(
             sum: new_sum,
         };
 
-        s.insert(station, updated_state);
+        s.insert(station.to_string(), updated_state);
     }
     println!("{:?}: End read_chunk", thread::current().id());
     Ok(())
@@ -131,15 +151,32 @@ fn read(
     let file_size = fs::metadata(&path)?.len();
     let chunk_size: u64 = file_size / nb_cores as u64;
 
+    let mut handles: Vec<JoinHandle<()>> = vec![];
+
     for core in 0..nb_cores {
         let stat = Arc::clone(&stations_stats);
         let path = path.clone();
         println!("{:?}: Before spawning in read", thread::current().id());
         let _thread = std::thread::spawn(move || {
             let start = core as u64 * chunk_size;
-            read_chunk(path, stat, start, chunk_size).unwrap();
+            match read_chunk(path, stat, start, chunk_size) {
+                Err(e) => println!("{:?}: Error : {e}", thread::current().id()),
+                _ => println!("{:?}: Finished", thread::current().id()),
+            };
         });
-        println!("{:?}: After spawning thread {:?}", thread::current().id(), _thread.thread().id());
+
+        println!(
+            "{:?}: After spawning thread {:?}",
+            thread::current().id(),
+            _thread.thread().id()
+        );
+
+        handles.push(_thread);
+    }
+
+    for child in handles {
+        // Wait for the threads to finish. Returns a result.
+        let _ = child.join();
     }
     Ok(())
 }
