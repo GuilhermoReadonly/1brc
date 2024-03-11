@@ -1,9 +1,10 @@
+#![allow(unused_variables)]
+
 use std::{
-    collections::BTreeMap,
     error::Error,
     fmt::Display,
     fs::{self, File},
-    io::{BufRead, BufReader, Seek},
+    io::{BufRead, BufReader, Read, Seek},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Instant,
@@ -29,14 +30,17 @@ impl Display for State {
     }
 }
 
+// type Map<K, V> = std::collections::HashMap<K, V>;
+type Map<K, V> = std::collections::BTreeMap<K, V>;
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let stations_stats: BTreeMap<String, State> = BTreeMap::new();
+    let stations_stats: Map<String, State> = Map::new();
     let stations_stats = Arc::new(Mutex::new(stations_stats));
     let cores: usize = std::thread::available_parallelism().unwrap().into();
 
     let path = match std::env::args().skip(1).next() {
         Some(path) => path,
-        None => "measurements_sample.txt".to_owned(),
+        None => "measurements.txt".to_owned(),
     };
 
     let metadata = fs::metadata(&path)?;
@@ -44,35 +48,49 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let now = Instant::now();
     read(cores, path, stations_stats.clone())?;
-    let elapsed_time = now.elapsed();
-    println!("Running read() took {} us.", elapsed_time.as_micros());
+    println!("Running read() took {} us.", now.elapsed().as_micros());
 
     let now = Instant::now();
     write_result(stations_stats)?;
-    let elapsed_time = now.elapsed();
     println!(
         "Running write_result() took {} us.",
-        elapsed_time.as_micros()
+        now.elapsed().as_micros()
     );
 
     Ok(())
 }
 
-fn write_result(stations_stats: Arc<Mutex<BTreeMap<String, State>>>) -> Result<(), Box<dyn Error>> {
-    print!("{{");
+fn read(
+    nb_cores: usize,
+    path: String,
+    stations_stats: Arc<Mutex<Map<String, State>>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut file = File::open(&path)?;
 
-    let s = stations_stats.lock().unwrap();
-
-    for (station, state) in s.iter() {
-        print!("{station}={state}, ");
+    let mut buffer = [0; 10000];
+        
+    let mut size_read = 1;
+    let mut lines_read = 0;
+    let mut i = 0;
+    while size_read != 0 {
+        size_read = file.read(&mut buffer)?;
+        
+        lines_read += buffer.bytes().filter(|c|{
+            let b = *c.as_ref().unwrap();
+            '\n' as u8 == b
+        }).count();
+        
+        if i % 100_000_000 == 0{
+            println!("{:?}: Read {lines_read}", thread::current().id());
+        }
+        i += 1;
     }
-    println!("}}");
     Ok(())
 }
 
-fn read_chunk(
+fn _read_chunk(
     path: String,
-    stations_stats: Arc<Mutex<BTreeMap<String, State>>>,
+    stations_stats: Arc<Mutex<Map<String, State>>>,
     _start: u64,
     _size: u64,
 ) -> Result<(), Box<dyn Error>> {
@@ -81,13 +99,11 @@ fn read_chunk(
 
     file.seek(std::io::SeekFrom::Start(_start))?;
 
-
     let lines = BufReader::new(file).lines();
 
     let mut size_read = 0;
     for line in lines {
-
-        if size_read >= _size{
+        if size_read >= _size {
             break;
         }
         let line_string = line?;
@@ -95,7 +111,7 @@ fn read_chunk(
         size_read += line_string.bytes().len() as u64;
 
         let splitline: Vec<&str> = line_string.split(";").collect();
-        if splitline.len() != 2{
+        if splitline.len() != 2 {
             println!("{:?}: After {size_read} read from {_start}, the line is malformed: {line_string:?}", thread::current().id());
             continue;
         }
@@ -140,10 +156,10 @@ fn read_chunk(
     Ok(())
 }
 
-fn read(
+fn _read(
     nb_cores: usize,
     path: String,
-    stations_stats: Arc<Mutex<BTreeMap<String, State>>>,
+    stations_stats: Arc<Mutex<Map<String, State>>>,
 ) -> Result<(), Box<dyn Error>> {
     let file_size = fs::metadata(&path)?.len();
     let chunk_size: u64 = file_size / nb_cores as u64;
@@ -156,7 +172,7 @@ fn read(
         println!("{:?}: Before spawning in read", thread::current().id());
         let _thread = std::thread::spawn(move || {
             let start = core as u64 * chunk_size;
-            match read_chunk(path, stat, start, chunk_size) {
+            match _read_chunk(path, stat, start, chunk_size) {
                 Err(e) => println!("{:?}: Error : {e}", thread::current().id()),
                 _ => println!("{:?}: Finished", thread::current().id()),
             };
@@ -175,5 +191,17 @@ fn read(
         // Wait for the threads to finish. Returns a result.
         let _ = child.join();
     }
+    Ok(())
+}
+
+fn write_result(stations_stats: Arc<Mutex<Map<String, State>>>) -> Result<(), Box<dyn Error>> {
+    print!("{{");
+
+    let s = stations_stats.lock().unwrap();
+
+    for (station, state) in s.iter() {
+        print!("{station}={state}, ");
+    }
+    println!("}}");
     Ok(())
 }
