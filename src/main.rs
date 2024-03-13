@@ -1,10 +1,14 @@
-#![allow(unused_variables, unused_imports, dead_code)]
+// #![allow(unused_variables, unused_imports, dead_code)]
 
 use std::{
-    error::Error, fmt::Display, fs::{self, File}, io::BufRead, os::fd::AsRawFd, sync::{Arc, Mutex}, thread, time::Instant
+    error::Error,
+    fmt::Display,
+    fs::{self, File},
+    io::BufRead,
+    sync::Arc,
+    thread::{self, JoinHandle},
+    time::Instant,
 };
-
-use libc::mmap;
 
 use crate::mmap::MmapOptions;
 
@@ -40,11 +44,9 @@ impl Default for Stats {
 }
 
 // type Map<K, V> = std::collections::HashMap<K, V>;
-type Map<K, V> = std::collections::BTreeMap<K, V>;
+type Map = std::collections::BTreeMap<String, Stats>;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let stations_stats: Map<String, Stats> = Map::new();
-    let stations_stats = Arc::new(Mutex::new(Map::new()));
     let cores: usize = std::thread::available_parallelism().unwrap().into();
 
     let path = match std::env::args().skip(1).next() {
@@ -54,11 +56,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let now = Instant::now();
 
-    read(cores, path, stations_stats.clone())?;
+    let stations_stats = read(cores, path)?;
     println!("Running read() took {} us.", now.elapsed().as_micros());
 
     let now = Instant::now();
-    write_result(stations_stats.clone())?;
+    write_result(stations_stats)?;
     println!(
         "Running write_result() took {} us.",
         now.elapsed().as_micros()
@@ -67,55 +69,97 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn read(
-    nb_cores: usize,
-    path: String,
-    stations_stats: Arc<Mutex<Map<String, Stats>>>,
-) -> Result<(), Box<dyn Error>> {
+fn read(nb_cores: usize, path: String) -> Result<Map, Box<dyn Error>> {
     let metadata = fs::metadata(&path)?;
-    println!("File size = {}", metadata.len());
+    println!(
+        "{:?}: File size = {}",
+        thread::current().id(),
+        metadata.len()
+    );
 
     let file = File::open(&path)?;
     let mmap = unsafe { MmapOptions::new().map(&file)? };
 
-    
+    let mmap = Arc::new(mmap);
 
-    for (i, line) in mmap.lines().enumerate(){
-        let line = line?;
+    let chunk_size = mmap.len() / nb_cores;
 
-        let (city, value) = line.split_once(';').unwrap();
-        let value: f64 = value.parse().unwrap();
-        let mut stations_stats = stations_stats.lock().unwrap();
+    let mut threads: Vec<JoinHandle<Map>> = vec![];
 
-        let stat = stations_stats.entry(city.to_string()).or_insert(Stats::default());
+    let mut mmap_slices = vec![];
 
-        stat.sum += value;
-        stat.count += 1;
-        stat.min = stat.min.min(value);
-        stat.max = stat.max.max(value);
+    for i in 0..nb_cores {
+        let start = i * chunk_size;
+        let end = if start + chunk_size > mmap.len() {
+            mmap.len()
+        } else {
+            start + chunk_size
+        };
+        let m = (start, end);
+        mmap_slices.push(m);
+    }
 
-        if i%10_000_000 == 0{
-            println!("Lines = {i}");
-        }
+    println!(
+        "{:?}: cores = {}",
+        thread::current().id(),
+        mmap_slices.len()
+    );
 
-    };
-    // for i in 0..nb_cores{
-    //     thread::spawn(move ||{
-    //         for line in mmap.lines(){
-                
-    //         }
-    //     });
-    // };
+    let mut result: Map = Map::new();
 
-    Ok(())
+    for (start, end) in mmap_slices {
+        let mmap = mmap.clone();
+        let thread_handle = thread::spawn(move || {
+            let mut s: Map = Map::new();
+            for (i, line) in mmap[start..end].lines().enumerate() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(e) => {
+                        println!("{:?}: {e}", thread::current().id());
+                        continue;
+                    }
+                };
+
+                let (city, value) = match line.split_once(';') {
+                    Some((city, value)) => (city, value),
+                    None => {
+                        println!("{:?}: split failed on line {i}", thread::current().id());
+                        continue;
+                    }
+                };
+                let value: f64 = match value.parse() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        println!("{:?}: {e}", thread::current().id());
+                        continue;
+                    }
+                };
+
+                let stat = s.entry(city.to_string()).or_insert(Stats::default());
+
+                stat.sum += value;
+                stat.count += 1;
+                stat.min = stat.min.min(value);
+                stat.max = stat.max.max(value);
+            }
+            s
+        });
+
+        threads.push(thread_handle);
+    }
+
+    for t in threads {
+        let mut partial_res = t.join().unwrap();
+        result.append(&mut partial_res);
+    }
+
+    Ok(result)
 }
 
-fn write_result(stations_stats: Arc<Mutex<Map<String, Stats>>>) -> Result<(), Box<dyn Error>> {
+fn write_result(stations_stats: Map) -> Result<(), Box<dyn Error>> {
     print!("{{");
 
-    let s = stations_stats.lock().unwrap();
-
-    for (station, state) in s.iter() {
+    for (station, state) in stations_stats.iter() {
         print!("{station}={state}, ");
     }
     println!("}}");
@@ -158,7 +202,7 @@ mod mmap {
     pub struct MmapOptions {
         offset: u64,
         len: Option<usize>,
-        stack: bool,
+        _stack: bool,
     }
 
     impl MmapOptions {
@@ -211,7 +255,7 @@ mod mmap {
         /// # Ok(())
         /// # }
         /// ```
-        pub fn offset(&mut self, offset: u64) -> &mut Self {
+        pub fn _offset(&mut self, offset: u64) -> &mut Self {
             self.offset = offset;
             self
         }
@@ -238,7 +282,7 @@ mod mmap {
         /// # Ok(())
         /// # }
         /// ```
-        pub fn len(&mut self, len: usize) -> &mut Self {
+        pub fn _len(&mut self, len: usize) -> &mut Self {
             self.len = Some(len);
             self
         }
@@ -273,8 +317,8 @@ mod mmap {
         /// # Ok(())
         /// # }
         /// ```
-        pub fn stack(&mut self) -> &mut Self {
-            self.stack = true;
+        pub fn _stack(&mut self) -> &mut Self {
+            self._stack = true;
             self
         }
 
@@ -317,11 +361,10 @@ mod mmap {
         ///
         /// This method returns an error when the underlying system call fails, which can happen for a
         /// variety of reasons, such as when the file is not open with read permissions.
-        pub unsafe fn map_exec(&self, file: &File) -> Result<Mmap> {
-            MmapInner::map_exec(self.get_len(file)?, file, self.offset)
+        pub unsafe fn _map_exec(&self, file: &File) -> Result<Mmap> {
+            MmapInner::_map_exec(self.get_len(file)?, file, self.offset)
                 .map(|inner| Mmap { inner: inner })
         }
-
     }
 
     /// A handle to an immutable memory mapped buffer.
@@ -401,10 +444,9 @@ mod mmap {
         /// # Ok(())
         /// # }
         /// ```
-        pub unsafe fn map(file: &File) -> Result<Mmap> {
+        pub unsafe fn _map(file: &File) -> Result<Mmap> {
             MmapOptions::new().map(file)
         }
-
     }
 
     impl Deref for Mmap {
@@ -444,7 +486,7 @@ mod mmap {
             target_os = "freebsd",
             target_os = "android"
         ))]
-        const MAP_STACK: libc::c_int = libc::MAP_STACK;
+        const _MAP_STACK: libc::c_int = libc::MAP_STACK;
 
         #[cfg(not(any(
             all(target_os = "linux", not(target_arch = "mips")),
@@ -511,7 +553,7 @@ mod mmap {
                 )
             }
 
-            pub fn map_exec(len: usize, file: &File, offset: u64) -> io::Result<MmapInner> {
+            pub fn _map_exec(len: usize, file: &File, offset: u64) -> io::Result<MmapInner> {
                 MmapInner::new(
                     len,
                     libc::PROT_READ | libc::PROT_EXEC,
@@ -521,7 +563,7 @@ mod mmap {
                 )
             }
 
-            pub fn map_mut(len: usize, file: &File, offset: u64) -> io::Result<MmapInner> {
+            pub fn _map_mut(len: usize, file: &File, offset: u64) -> io::Result<MmapInner> {
                 MmapInner::new(
                     len,
                     libc::PROT_READ | libc::PROT_WRITE,
@@ -531,7 +573,7 @@ mod mmap {
                 )
             }
 
-            pub fn map_copy(len: usize, file: &File, offset: u64) -> io::Result<MmapInner> {
+            pub fn _map_copy(len: usize, file: &File, offset: u64) -> io::Result<MmapInner> {
                 MmapInner::new(
                     len,
                     libc::PROT_READ | libc::PROT_WRITE,
@@ -542,8 +584,8 @@ mod mmap {
             }
 
             /// Open an anonymous memory map.
-            pub fn map_anon(len: usize, stack: bool) -> io::Result<MmapInner> {
-                let stack = if stack { MAP_STACK } else { 0 };
+            pub fn _map_anon(len: usize, stack: bool) -> io::Result<MmapInner> {
+                let stack = if stack { _MAP_STACK } else { 0 };
                 MmapInner::new(
                     len,
                     libc::PROT_READ | libc::PROT_WRITE,
@@ -553,7 +595,7 @@ mod mmap {
                 )
             }
 
-            pub fn flush(&self, offset: usize, len: usize) -> io::Result<()> {
+            pub fn _flush(&self, offset: usize, len: usize) -> io::Result<()> {
                 let alignment = (self.ptr as usize + offset) % page_size();
                 let offset = offset as isize - alignment as isize;
                 let len = len + alignment;
@@ -567,7 +609,7 @@ mod mmap {
                 }
             }
 
-            pub fn flush_async(&self, offset: usize, len: usize) -> io::Result<()> {
+            pub fn _flush_async(&self, offset: usize, len: usize) -> io::Result<()> {
                 let alignment = offset % page_size();
                 let aligned_offset = offset - alignment;
                 let aligned_len = len + alignment;
@@ -585,7 +627,7 @@ mod mmap {
                 }
             }
 
-            fn mprotect(&mut self, prot: libc::c_int) -> io::Result<()> {
+            fn _mprotect(&mut self, prot: libc::c_int) -> io::Result<()> {
                 unsafe {
                     let alignment = self.ptr as usize % page_size();
                     let ptr = self.ptr.offset(-(alignment as isize));
@@ -598,16 +640,16 @@ mod mmap {
                 }
             }
 
-            pub fn make_read_only(&mut self) -> io::Result<()> {
-                self.mprotect(libc::PROT_READ)
+            pub fn _make_read_only(&mut self) -> io::Result<()> {
+                self._mprotect(libc::PROT_READ)
             }
 
-            pub fn make_exec(&mut self) -> io::Result<()> {
-                self.mprotect(libc::PROT_READ | libc::PROT_EXEC)
+            pub fn _make_exec(&mut self) -> io::Result<()> {
+                self._mprotect(libc::PROT_READ | libc::PROT_EXEC)
             }
 
-            pub fn make_mut(&mut self) -> io::Result<()> {
-                self.mprotect(libc::PROT_READ | libc::PROT_WRITE)
+            pub fn _make_mut(&mut self) -> io::Result<()> {
+                self._mprotect(libc::PROT_READ | libc::PROT_WRITE)
             }
 
             #[inline]
@@ -616,7 +658,7 @@ mod mmap {
             }
 
             #[inline]
-            pub fn mut_ptr(&mut self) -> *mut u8 {
+            pub fn _mut_ptr(&mut self) -> *mut u8 {
                 self.ptr as *mut u8
             }
 
