@@ -159,14 +159,17 @@ fn read(nb_cores: usize, path: String) -> Result<Map, Box<dyn Error>> {
 fn write_result(stations_stats: Map) -> Result<(), Box<dyn Error>> {
     print!("{{");
 
-    for (station, state) in stations_stats.iter() {
-        print!("{station}={state}, ");
+    let mut stations_iter = stations_stats.iter() ;
+    let first_elt = stations_iter.next().unwrap();
+    print!("{}={}", first_elt.0, first_elt.1);
+    for (station, state) in stations_iter {
+        print!(",{station}={state}");
     }
     println!("}}");
     Ok(())
 }
 
-// unshamely copy-pasted from https://github.com/danburkert/memmap-rs
+////// unshamely copy-pasted from https://github.com/danburkert/memmap-rs
 mod mmap {
 
     #[cfg(unix)]
