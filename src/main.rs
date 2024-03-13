@@ -24,10 +24,10 @@ impl Display for Stats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}/{}/{}",
+            "{:.1}/{:.1}/{:.1}",
             self.min,
+            self.sum / (self.count as f64),
             self.max,
-            self.sum / (self.count as f64)
         )
     }
 }
@@ -159,11 +159,11 @@ fn read(nb_cores: usize, path: String) -> Result<Map, Box<dyn Error>> {
 fn write_result(stations_stats: Map) -> Result<(), Box<dyn Error>> {
     print!("{{");
 
-    let mut stations_iter = stations_stats.iter() ;
+    let mut stations_iter = stations_stats.iter();
     let first_elt = stations_iter.next().unwrap();
     print!("{}={}", first_elt.0, first_elt.1);
     for (station, state) in stations_iter {
-        print!(",{station}={state}");
+        print!(", {station}={state}");
     }
     println!("}}");
     Ok(())
