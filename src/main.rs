@@ -163,7 +163,7 @@ fn read(nb_cores: usize, path: String) -> Result<Map, Box<dyn Error>> {
             let mut partial_res = t.join().unwrap();
             result.append(&mut partial_res);
         }
-        remaining_bytes_to_treat -= file_part_max_size as u64;
+        remaining_bytes_to_treat = remaining_bytes_to_treat.saturating_sub(file_part_max_size as u64);
     }
 
     Ok(result)
