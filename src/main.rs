@@ -71,86 +71,99 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn read(nb_cores: usize, path: String) -> Result<Map, Box<dyn Error>> {
     let metadata = fs::metadata(&path)?;
-    println!(
-        "{:?}: File size = {}",
-        thread::current().id(),
-        metadata.len()
-    );
+    let file_size = metadata.len();
+    println!("{:?}: File size = {file_size}", thread::current().id());
 
     let file = File::open(&path)?;
-    let mmap = unsafe { MmapOptions::new().map(&file)? };
 
-    let mmap = Arc::new(mmap);
-
-    let chunk_size = mmap.len() / nb_cores;
-
-    let mut threads: Vec<JoinHandle<Map>> = vec![];
-
-    let mut mmap_slices = vec![];
-
-    for i in 0..nb_cores {
-        let start = i * chunk_size;
-        let end = if start + chunk_size > mmap.len() {
-            mmap.len()
-        } else {
-            start + chunk_size
-        };
-        let m = (start, end);
-        mmap_slices.push(m);
-    }
-
-    println!(
-        "{:?}: cores = {}",
-        thread::current().id(),
-        mmap_slices.len()
-    );
-
+    let file_part_max_size = 1_000_000_000;
+    let mut remaining_bytes_to_treat = file_size;
     let mut result: Map = Map::new();
 
-    for (start, end) in mmap_slices {
-        let mmap = mmap.clone();
-        let thread_handle = thread::spawn(move || {
-            let mut s: Map = Map::new();
-            for (i, line) in mmap[start..end].lines().enumerate() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(e) => {
-                        println!("{:?}: {e}", thread::current().id());
-                        continue;
-                    }
-                };
+    while remaining_bytes_to_treat > 0 {
+        println!(
+            "{:?}: remaining bytes to treat = {remaining_bytes_to_treat}",
+            thread::current().id()
+        );
 
-                let (city, value) = match line.split_once(';') {
-                    Some((city, value)) => (city, value),
-                    None => {
-                        println!("{:?}: split failed on line {i}", thread::current().id());
-                        continue;
-                    }
-                };
-                let value: f64 = match value.parse() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        println!("{:?}: {e}", thread::current().id());
-                        continue;
-                    }
-                };
+        let mmap = unsafe {
+            MmapOptions::new()
+                .len(file_part_max_size.min(remaining_bytes_to_treat as usize))
+                .offset(file_size - remaining_bytes_to_treat)
+                .map(&file)?
+        };
 
-                let stat = s.entry(city.to_string()).or_insert(Stats::default());
+        let mmap = Arc::new(mmap);
 
-                stat.sum += value;
-                stat.count += 1;
-                stat.min = stat.min.min(value);
-                stat.max = stat.max.max(value);
-            }
-            s
-        });
+        let chunk_size = mmap.len() / nb_cores;
 
-        threads.push(thread_handle);
-    }
+        let mut threads: Vec<JoinHandle<Map>> = vec![];
 
-    for t in threads {
-        let mut partial_res = t.join().unwrap();
-        result.append(&mut partial_res);
+        let mut mmap_slices = vec![];
+
+        for i in 0..nb_cores {
+            let start = i * chunk_size;
+            let end = if start + chunk_size > mmap.len() {
+                mmap.len()
+            } else {
+                start + chunk_size
+            };
+            let m = (start, end);
+            mmap_slices.push(m);
+        }
+
+        println!(
+            "{:?}: cores = {}",
+            thread::current().id(),
+            mmap_slices.len()
+        );
+
+        for (start, end) in mmap_slices {
+            let mmap = mmap.clone();
+            let thread_handle = thread::spawn(move || {
+                let mut s: Map = Map::new();
+                for (i, line) in mmap[start..end].lines().enumerate() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(e) => {
+                            println!("{:?}: {e}", thread::current().id());
+                            continue;
+                        }
+                    };
+
+                    let (city, value) = match line.split_once(';') {
+                        Some((city, value)) => (city, value),
+                        None => {
+                            println!("{:?}: split failed on line {i}", thread::current().id());
+                            continue;
+                        }
+                    };
+                    let value: f64 = match value.parse() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!("{:?}: {e}", thread::current().id());
+                            continue;
+                        }
+                    };
+
+                    let stat = s.entry(city.to_string()).or_insert(Stats::default());
+
+                    stat.sum += value;
+                    stat.count += 1;
+                    stat.min = stat.min.min(value);
+                    stat.max = stat.max.max(value);
+                }
+                s
+            });
+
+            threads.push(thread_handle);
+        }
+
+        for t in threads {
+            let mut partial_res = t.join().unwrap();
+            result.append(&mut partial_res);
+        }
+        remaining_bytes_to_treat -= file_part_max_size as u64;
     }
 
     Ok(result)
@@ -258,7 +271,7 @@ mod mmap {
         /// # Ok(())
         /// # }
         /// ```
-        pub fn _offset(&mut self, offset: u64) -> &mut Self {
+        pub fn offset(&mut self, offset: u64) -> &mut Self {
             self.offset = offset;
             self
         }
@@ -285,7 +298,7 @@ mod mmap {
         /// # Ok(())
         /// # }
         /// ```
-        pub fn _len(&mut self, len: usize) -> &mut Self {
+        pub fn len(&mut self, len: usize) -> &mut Self {
             self.len = Some(len);
             self
         }
